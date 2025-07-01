@@ -1,26 +1,15 @@
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
-from PIL import Image
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 import os
-from PIL import Image, ImageDraw, ImageFont
 import torch
 import json
-torch.cuda.empty_cache()
 import cv2
+from PIL import Image
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, AutoModelForCausalLM
+from transformers import AutoTokenizer, BitsAndBytesConfig
+torch.cuda.empty_cache()
 
-# <editor-fold desc="1. Recognition">
-#os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # 设置模型加载GPU（1号GPU）
-model_path = '/home/hiuching-g/PRHK/Qwen'  # 修改为本地模型下载地址
+# <editor-fold desc=" 1. Load Model and provicde prompts">
 
-# 加载模型
-# 根据实际情况修改
-# img_path = "/home/hiuching-g/PRHK/test_images/surgery07_2615.png"
-img_folder = "/home/hiuching-g/PRHK/test_images"
-image_files = [f for f in os.listdir(img_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-
-# 目标定位框信息提问
+# 1.1 Provide prompt
 question = """Identify and localise the following objects from the image:
 
 (1) Surgical instruments like graspers, clip appliers, scissors, suction
@@ -44,18 +33,27 @@ Output example:
 ]
 """
 
-# 加载模型
-#model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, torch_dtype="auto", device_map="auto")
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, torch_dtype=torch.float16).to("cpu")
+# 1.2 Load Model and Processor
 
+model_path = '/home/hiuching-g/PRHK/Qwen'
+img_folder = "/home/hiuching-g/PRHK/test_images"
+image_files = [f for f in os.listdir(img_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True)
+# model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, quantization_config=bnb_config, trust_remote_code=True)
+model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, torch_dtype=torch.float16).to("cpu")
 processor = AutoProcessor.from_pretrained(model_path, use_fast=True)
 processor.save_pretrained(model_path)
 
-for idx, img_file in enumerate(image_files):
-    img_path = os.path.join(img_folder, img_file)
-    print(f"🔍 Processing image: {img_file}, size: {Image.open(img_path).size}")
+# </editor-fold>
 
-    # 输入配置
+
+for idx, img_file in enumerate(image_files):
+    # <editor-fold desc=" 2. Process each image and generate json output">
+    img_path = os.path.join(img_folder, img_file)
+    print(f"Processing image: {img_file}, size: {Image.open(img_path).size}")
+
+    # 2.1 Input configuration
     image = Image.open(img_path)
     messages = [
         {
@@ -72,8 +70,8 @@ for idx, img_file in enumerate(image_files):
     inputs = processor(text=[text_prompt], images=[image], padding=True, return_tensors="pt")
     # inputs = inputs.to('cuda')
 
-    # 推理
-    generated_ids = model.generate(**inputs, max_new_tokens=512)
+    # 2.2 Inference
+    generated_ids = model.generate(**inputs, max_new_tokens=1024)
     generated_ids_trimmed = [
         out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
@@ -83,43 +81,32 @@ for idx, img_file in enumerate(image_files):
     print(output_text)
     # </editor-fold>
 
-    # <editor-fold desc="2. Post-processing and saving results">
-    # output_text = ['[\n  {"image_name": "[original name of the img].png", "image_index": 0, "label": "Suction", "x1": 120, "y1": 90, "x2": 180, "y2": 160},\n  {"image_name": "[original name of the img].png", "image_index": 0, "label": "Scissors", "x1": 120, "y1": 90, "x2": 180, "y2": 160},\n ']
-    # Step 1: 提取字符串
+    # <editor-fold desc="3. Post-process the JSON file, and save the annotated image">
 
+    # 3.1 Extract the raw JSON string from the output ==
     raw_json = output_text[0]
 
-    # Step 2: 补上缺失的 JSON 结尾，并移除末尾多余逗号
-    raw_json = raw_json.strip()  # 去除前后空格和换行
+    raw_json = raw_json.strip()  # delete leading/trailing whitespace
     if raw_json.endswith(","):
-        raw_json = raw_json[:-1]  # 去掉结尾多余逗号
+        raw_json = raw_json[:-1]  # delete trailing comma
     if not raw_json.endswith("]"):
-        raw_json += "]"  # 确保结尾有 ]
+        raw_json += "]"  # make sure the string ends with a closing bracket
 
-    # Step 3: 将其中的 [original name of the img] 替换为实际文件名
-    # img_filename = "surgery07_2615.png"  # 根据你的图像路径实际修改
     raw_json = raw_json.replace("[original name of the img].png", img_file)
 
-    # # Step 4: 尝试解析 JSON
-    # try:
-    #     data = json.loads(raw_json)
-    #     print("✅ JSON 解析成功！")
-    # except json.JSONDecodeError as e:
-    #     print("❌ JSON 不合法:", e)
 
     # img_path = "/home/hiuching-g/PRHK/test_images/surgery07_2615.png"
     json_path  = "/home/hiuching-g/PRHK/Output_Qwen/qwen.json"
     out_dir    = "/home/hiuching-g/PRHK/Output_Qwen/"
     os.makedirs(out_dir, exist_ok=True)
 
-    # Step 1: 将 output_text 写入 json 文件
-    # clean_json_str = raw_json[0].replace("\n", "").replace("[original name of the img]", os.path.basename(img_path))
-    data = json.loads(raw_json)  # 确保内容是合法 JSON
+    # 3.2 Load the JSON data and adjust bounding box coordinates
+    data = json.loads(raw_json)  # make sure the JSON is valid
     image = Image.open(img_path)
-    print("📐 原图大小:", image.size)
-    original_width, original_height = image.size  # PIL.Image 原图大小
-    model_input_size = processor.image_processor.size  # 通常为 dict，例如 {"height": 448, "width": 448}
-    print("📐 processor 是否改变图像尺寸？", model_input_size)
+    print("Original image size", image.size)
+    original_width, original_height = image.size
+    model_input_size = processor.image_processor.size
+    print("processor image size", model_input_size)
 
     if "width" in model_input_size and "height" in model_input_size:
         model_width = model_input_size["width"]
@@ -129,7 +116,7 @@ for idx, img_file in enumerate(image_files):
     else:
         raise ValueError(f"Unrecognized image size format: {model_input_size}")
 
-    # 修正每个 box 的位置
+    # 3.3 fix bounding box coordinates
     for obj in data:
         obj["x1"] = int(obj["x1"] / original_width * model_width)
         obj["y1"] = int(obj["y1"] / original_height * model_height)
@@ -138,7 +125,7 @@ for idx, img_file in enumerate(image_files):
     with open(json_path, "w") as f:
         json.dump(data, f, indent=2)
 
-    # Step 2: 加载图像并绘制标注
+    # 3.4 Annotate the image with bounding boxes and labels
     img = cv2.imread(img_path)
     for obj in data:
         label = obj["label"]
@@ -147,7 +134,7 @@ for idx, img_file in enumerate(image_files):
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
         cv2.putText(img, label, (x1, max(0, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 1)
 
-    # Step 3: 保存输出图像
+    # 3.5 Save the annotated image
     out_path = os.path.join(out_dir, f"Qwen_annotated_{os.path.basename(img_path)}")
     cv2.imwrite(out_path, img)
     print(f"✅ Saved annotated image to: {out_path}")
