@@ -5,7 +5,16 @@ import cv2
 from PIL import Image
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, AutoModelForCausalLM
 from transformers import AutoTokenizer, BitsAndBytesConfig
+from modelscope import snapshot_download
+# Or from huggingface_hub import snapshot_download
 torch.cuda.empty_cache()
+
+# Run the following lines to download the model if you haven't done so already
+# model_path = snapshot_download(
+#     repo_id="Qwen/Qwen2.5-VL-7B-Instruct",
+#     local_dir="./Model",
+#     local_dir_use_symlinks=False
+# )
 
 # <editor-fold desc=" 1. Load Model and provicde prompts">
 
