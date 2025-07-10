@@ -1,42 +1,51 @@
+import os
 import torch
 import numpy as np
 import cv2
-from PIL import Image
 from segment_anything import SamPredictor, sam_model_registry
 
-# Step 1: Load model
+# ====== Configuration ======
 sam_checkpoint = "/home/hiuching-g/PRHK/segment-anything/weights/sam_vit_b_01ec64.pth"
 model_type = "vit_b"
+input_folder = "/home/hiuching-g/PRHK/test_images/"
+output_folder = "/home/hiuching-g/PRHK/Output_seg_anything/"
 
+os.makedirs(output_folder, exist_ok=True)
+
+# ====== Load SAM Model ======
 device = "cuda" if torch.cuda.is_available() else "cpu"
 sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 sam.to(device=device)
-
-# Step 2: Load image
-image_path = "/home/hiuching-g/PRHK/test_images/surgery07_2615.png"
-image = cv2.imread(image_path)
-image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-# Step 3: Create predictor
 predictor = SamPredictor(sam)
-predictor.set_image(image)
 
-# Step 4: Provide a prompt (e.g., a point)
-input_point = np.array([[500, 400]])  # the point you want to segment
-input_label = np.array([1])           # 1 represents foreground，0 represents background
+# ====== Loop Over Images ======
+image_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
 
-# Step 5: Predict mask
-masks, scores, logits = predictor.predict(
-    point_coords=input_point,
-    point_labels=input_label,
-    multimask_output=True
-)
+for filename in image_files:
+    image_path = os.path.join(input_folder, filename)
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"⚠️ Failed to read {filename}")
+        continue
 
-# Step 6: Visualize and save the first mask
-mask = masks[0]
-masked_image = image.copy()
-masked_image[~mask] = 0
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    predictor.set_image(image_rgb)
 
-cv2.imwrite("/home/hiuching-g/PRHK/Output_seg_anything/seg_surgery07_2615.jpg", cv2.cvtColor(masked_image, cv2.COLOR_RGB2BGR))
-print("✅ Mask saved to seg_surgery07_2615.jpg")
+    # You can later modify this to use a smarter prompt strategy (like center point or automatic)
+    height, width, _ = image.shape
+    input_point = np.array([[width // 2, height // 2]])
+    input_label = np.array([1])  # foreground
 
+    masks, scores, logits = predictor.predict(
+        point_coords=input_point,
+        point_labels=input_label,
+        multimask_output=True
+    )
+
+    mask = masks[0]
+    masked_image = image_rgb.copy()
+    masked_image[~mask] = 0
+
+    output_path = os.path.join(output_folder, f"seg_{filename}")
+    cv2.imwrite(output_path, cv2.cvtColor(masked_image, cv2.COLOR_RGB2BGR))
+    print(f"✅ Saved: {output_path}")
