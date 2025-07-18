@@ -14,7 +14,7 @@ image_dir = "/home/hiuching-g/PRHK/test_images"
 output_dir = "/home/hiuching-g/PRHK/Output_QWen_steps"
 
 
-# 🟢 upload image and ask for bboxes, and step
+# upload image and ask for bboxes, and step
 input_text = (
     "You are given a robotics surgical image. Perform the following tasks:\n\n"
     "1. Identify and localize all **surgical instruments** in the image, with only its specific name.\n"
@@ -47,7 +47,7 @@ for image_file in os.listdir(image_dir):
     image_path = os.path.join(image_dir, image_file)
     print(f"\n🔍 Processing {image_file}...")
 
-    # 🟢 Read local images and transform it to base64 style
+    # Read local images and transform it to base64 style
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
@@ -112,7 +112,7 @@ for image_file in os.listdir(image_dir):
             x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
             label = box.get("label", "Tool")
 
-            # 设置不同类别的颜色
+            # Set different colors for tissues and instruments
             if "tissue" in label.lower():
                 color = "green"
             else:
