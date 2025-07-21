@@ -3,7 +3,7 @@ from groundingdino.util.inference import load_model, load_image, predict, annota
 import cv2
 import numpy as np
 import torch 
-
+import difflib
 # Model initialization, only execute once
 MODEL_CONFIG = "groundingdino/config/GroundingDINO_SwinT_OGC.py"
 MODEL_WEIGHTS = "weights/groundingdino_swint_ogc.pth"
@@ -30,32 +30,31 @@ def recognize_step(phrases):
     detected = set()
     for ph in phrases:
         low = ph.lower()
-        for kw, step in STEP_KEYWORDS.items():
-            if kw in low:
-                detected.add(step)
+        for kw in STEP_KEYWORDS.keys():
+            if difflib.get_close_matches(kw.lower(), [low], cutoff=0.6):
+                detected.add(STEP_KEYWORDS[kw])
     return ", ".join(sorted(detected)) if detected else "Unknown"
-# 参数配置
-INPUT_DIR     = "/home/hiuching-g/PRHK/test_images"
-OUTPUT_DIR = "/home/hiuching-g/PRHK/Output_GroundingDINO"
-TEXT_PROMPT = (
-    "Robotic grasper . monopolar curved scissors . vessel sealer . suction . "
-    "Hook cautery . fenestrated forceps Bleeding site . necrotic tissue . enlarged uterus . "
-    "adhesion . fatty tissue . cystic lesion . vessel proximity . tissue rupture "
-)
 
+# Parameter setup
+INPUT_DIR     = "/home/hiuching-g/PRHK/test_images"
+OUTPUT_DIR = "/home/hiuching-g/PRHK/Output/Output_GroundingDINO_Newprompts"
+TEXT_PROMPT = (
+"uterus, ovaries, fallopian tubes, bladder, ureter, robotic grasper, scissors, forceps, suction, needle driver"
+)
 STEP_KEYWORDS = {
-    "hemostasis": "Hemostasis",
-    "dissection": "Dissection",
-    "mobilization": "Mobilization",
-    "excision": "Excision",
-    "exposure": "Exposure",
-    "adhesion lysis": "Adhesion Lysis",
-    "blunt dissection": "Blunt Dissection",
-    "suctioning": "Suctioning",
+    "Port Placement and Docking": "Port Placement and Docking",
+    "Exposure and Inspection": "Exposure and Inspection",
+    "Uterine Mobilization": "Uterine Mobilization",
+    "Vessel Control": "Vessel Control",
+    "Bladder Dissection and Bladder Flap Creation": "Bladder Dissection and Bladder Flap Creation",
+    "Colpotomy": "Colpotomy",
+    "Uterus Removal": "Uterus Removal",
+    "Vaginal Cuff Closure": "Vaginal Cuff Closure",
+    "Final Hemostasis and Robot Exit": "Final Hemostasis and Robot Exit"
 }
 
-BOX_THRESHOLD = 0.35
-TEXT_THRESHOLD = 0.25
+BOX_THRESHOLD = 0.3
+TEXT_THRESHOLD = 0.2
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -83,6 +82,7 @@ for fname in os.listdir(INPUT_DIR):
     )
 
     # 2) cut boxes to fit the image size
+
     boxes = clamp_boxes(boxes, H, W)
     boxes = torch.from_numpy(boxes).float() 
 
