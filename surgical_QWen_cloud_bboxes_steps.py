@@ -11,33 +11,36 @@ import base64
 dashscope.api_key = 'sk-8694ac696f1c42aba2f1cfb254a5918d'
 
 image_dir = "/home/hiuching-g/PRHK/test_images"
-output_dir = "/home/hiuching-g/PRHK/Output_QWen_steps"
+output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps"
 
-
-# upload image and ask for bboxes, and step
 input_text = (
-    "You are given a robotics surgical image. Perform the following tasks:\n\n"
-    "1. Identify and localize all **surgical instruments** in the image, with only its specific name.\n"
-    "2. Identify and localize all **body tissue** in the image, with only its specific name.\n"
-    "3. Determine the most likely **surgical step** from the following 9 steps:\n"
+    "You are given a robotic surgical image. Perform the following:\n\n"
+    "1. Detect and localize **surgical instruments** using only specific names (e.g., Forceps, Scissors, Grasper). "
+    "Definitely avoid generic labels like 'surgical instrument'.\n"
+    "2. Detect and localize **body tissues** using specific anatomical names (e.g., Uterus, Bladder, Vaginal Wall). "
+    "Definitely avoid generic labels like 'body tissue'.\n"
+    "3. Identify the most likely **surgical step** from the following:\n"
     "- Port Placement and Docking\n"
     "- Exposure and Inspection\n"
     "- Uterine Mobilization\n"
     "- Vessel Control\n"
-    "- Bladder Dissection and Bladder Flap Creation\n"
+    "- Bladder Dissection and Flap Creation\n"
     "- Colpotomy\n"
     "- Uterus Removal\n"
     "- Vaginal Cuff Closure\n"
-    "- Final Hemostasis and Robot Exit\n\n"
-    "Output the result in this JSON format **(and only output this JSON)**:\n"
+    "- Final Hemostasis\n\n"
+    "Respond in **JSON only**, make sure the format is correct:\n"
     "{\n"
-    "  \"step\": \"<surgical step name>\",\n"
+    "  \"step\": \"<surgical step>\",\n"
     "  \"bboxes\": [\n"
-    "    {\"label\": \"<instrument_name or body_tissue>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
+    "    {\"label\": \"<specific name>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
     "    ...\n"
     "  ]\n"
     "}"
+    "**Make sure each bounding box is tightly fitted to the visible object, centered around the object mass.**"
 )
+
+
 
 
 for image_file in os.listdir(image_dir):
@@ -47,7 +50,7 @@ for image_file in os.listdir(image_dir):
     image_path = os.path.join(image_dir, image_file)
     print(f"\n🔍 Processing {image_file}...")
 
-    # Read local images and transform it to base64 style
+    # 🟢 Read local images and transform it to base64 style
     with open(image_path, "rb") as f:
         image_bytes = f.read()
     base64_image = base64.b64encode(image_bytes).decode("utf-8")
@@ -59,7 +62,7 @@ for image_file in os.listdir(image_dir):
     response = MultiModalConversation.call(
         model='qwen-vl-plus',
         messages=messages,
-        temperature=0.3,
+        temperature=0.4,
         result_format="message",
         vl_high_resolution_images=True
     )
@@ -112,7 +115,7 @@ for image_file in os.listdir(image_dir):
             x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
             label = box.get("label", "Tool")
 
-            # Set different colors for tissues and instruments
+            # 设置不同类别的颜色
             if "tissue" in label.lower():
                 color = "green"
             else:
@@ -129,8 +132,8 @@ for image_file in os.listdir(image_dir):
     draw.text((50, 20), f"Step: {step_name}", fill="blue", font=font_lar)
     print("✅ Step written down")
 
-    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill="yellow")
+    # cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    # draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill="yellow")
 
     # Save image
     output_path = os.path.join(output_dir, f"annotated_{image_file}")
