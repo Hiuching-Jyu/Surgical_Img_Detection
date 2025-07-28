@@ -9,7 +9,7 @@ import base64
 
 dashscope.api_key = 'sk-8694ac696f1c42aba2f1cfb254a5918d'
 
-image_dir = "/home/hiuching-g/PRHK/test_images_448"
+image_dir = "/home/hiuching-g/PRHK/test_images"
 output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_limited"
 
 input_text = (
@@ -45,9 +45,9 @@ input_text = (
 "    ...\n"
 "  ]\n"
 "}\n\n"
-"**Make sure each bounding box is tightly fitted to the visible object, centered around the object mass.**"
+"Try to identify at least 3 items for an image.\n"
 )
-
+# "**Make sure each bounding box is tightly fitted to the visible object, centered around the object mass.**"
 for image_file in os.listdir(image_dir):
     if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
         continue
