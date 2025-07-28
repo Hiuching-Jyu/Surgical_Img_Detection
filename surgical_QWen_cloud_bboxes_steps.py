@@ -4,44 +4,49 @@ import os
 import re
 import json
 from PIL import Image, ImageDraw, ImageFont
-import requests
-from io import BytesIO
 import base64
+# from rag_for_qwen import retrieve_context
 
 dashscope.api_key = 'sk-8694ac696f1c42aba2f1cfb254a5918d'
 
-image_dir = "/home/hiuching-g/PRHK/test_images"
-output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps"
+image_dir = "/home/hiuching-g/PRHK/test_images_448"
+output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_limited"
 
 input_text = (
-    "You are given a robotic surgical image. Perform the following:\n\n"
-    "1. Detect and localize **surgical instruments** using only specific names (e.g., Forceps, Scissors, Grasper). "
-    "Definitely avoid generic labels like 'surgical instrument'.\n"
-    "2. Detect and localize **body tissues** using specific anatomical names (e.g., Uterus, Bladder, Vaginal Wall). "
-    "Definitely avoid generic labels like 'body tissue'.\n"
-    "3. Identify the most likely **surgical step** from the following:\n"
-    "- Port Placement and Docking\n"
-    "- Exposure and Inspection\n"
-    "- Uterine Mobilization\n"
-    "- Vessel Control\n"
-    "- Bladder Dissection and Flap Creation\n"
-    "- Colpotomy\n"
-    "- Uterus Removal\n"
-    "- Vaginal Cuff Closure\n"
-    "- Final Hemostasis\n\n"
-    "Respond in **JSON only**, make sure the format is correct:\n"
-    "{\n"
-    "  \"step\": \"<surgical step>\",\n"
-    "  \"bboxes\": [\n"
-    "    {\"label\": \"<specific name>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
-    "    ...\n"
-    "  ]\n"
-    "}"
-    "**Make sure each bounding box is tightly fitted to the visible object, centered around the object mass.**"
+"You are given a robotic surgical image. Perform the following:\n\n"
+"1. Detect and localize **surgical instruments**. For each bounding box, assign exactly one of the following specific labels:\n"
+"- Bipolar Forceps\n"
+"- Monopolar Scissors\n"
+"- Suction Irrigator\n"
+"- Needle Driver\n"
+"- Cautery Hook\n"
+"- UnclearInstrument (if not identifiable)\n\n"
+"**Only choose the most likely instrument label for each object. Avoid generic labels like 'surgical instrument**'.\n\n"
+
+"2. Detect and localize **body tissues**. For each bounding box, assign exactly one of the following labels:\n"
+"- Uterus\n"
+"- Ovaries\n"
+"- Fallopian Tubes\n"
+"- Bladder\n"
+"- Ureter\n"
+"- UnclearBodyTissue (if not identifiable)\n\n"
+"**Again, choose only the most likely label for each tissue object**.\n\n"
+
+"3. Identify the most likely **surgical step**, selecting only one from the following options:\n"
+"- Preparation & Exposure\n"
+"- Dissection & Vessel Control\n"
+"- Uterus Removal & Closure\n\n"
+
+"Respond in **JSON only**, and ensure the format is correct:\n"
+"{\n"
+"  \"step\": \"<surgical step>\",\n"
+"  \"bboxes\": [\n"
+"    {\"label\": \"<specific label>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
+"    ...\n"
+"  ]\n"
+"}\n\n"
+"**Make sure each bounding box is tightly fitted to the visible object, centered around the object mass.**"
 )
-
-
-
 
 for image_file in os.listdir(image_dir):
     if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
