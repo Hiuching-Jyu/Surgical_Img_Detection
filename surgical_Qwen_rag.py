@@ -10,8 +10,8 @@ from rag_module import retrieve_step_by_rag
 # <editor-fold desc=" 1. Initialization for API-Key and dirs">
 dashscope.api_key = 'sk-8694ac696f1c42aba2f1cfb254a5918d'  # Replace with your key
 
-image_dir = "/home/hiuching-g/PRHK/test_images_448"
-output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_RAG_448"
+image_dir = "/home/hiuching-g/PRHK/test_images_236"
+output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_RAG_236"
 os.makedirs(output_dir, exist_ok=True)
 
 # === COCO category mapping (IDs are stable and unique) ===
@@ -280,8 +280,9 @@ for image_file in os.listdir(image_dir):
         # outer try-except to catch any unexpected errors
         print(f"❌ Unexpected error for {image_file}: {e}. Skipping this image.")
         # write a placeholder step prediction
+        image_id = os.path.splitext(image_file)[0].split("_")[0]
         step_predictions.append({
-            "image_id": image_file,
+            "image_id": image_id,
             "step_top1": "Unknown",
             "step_probs": {
                 "Preparation & Exposure": 1/3,
