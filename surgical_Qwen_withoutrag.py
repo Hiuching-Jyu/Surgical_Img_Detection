@@ -17,7 +17,6 @@ import concurrent.futures
 
 # <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
 dashscope.api_key = 'sk-'
-os.environ["OPENAI_API_KEY"] = "sk-proj-"
 openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
@@ -25,6 +24,8 @@ output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_withoutRAG_236"
 os.makedirs(output_dir, exist_ok=True)
 detections_path = os.path.join(output_dir, "detections_coco.json")
 done_images_file = os.path.join(output_dir, "done_images.txt")
+steps_pred_path = os.path.join(output_dir, "steps_prediction.json")
+steps_predictions = []
 
 # </editor-fold>
 # <editor-fold desc=" 1.2 Initialization: Find done images and prepare COCO categories">
@@ -437,7 +438,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
 
         # (1) Update global lists
         annotations.extend(coco_list)
-
+        steps_predictions.append(step_dict)
 
         # (3) Cache the processed image
         with open(done_images_file, "a", encoding="utf-8") as f:
@@ -461,3 +462,5 @@ coco_output = {
 }
 with open(detections_path, "w", encoding="utf-8") as f:
     json.dump(coco_output, f, ensure_ascii=False, indent=2)
+with open(steps_pred_path, "w", encoding="utf-8") as f:
+    json.dump(steps_predictions, f, ensure_ascii=False, indent=2)
