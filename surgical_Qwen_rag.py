@@ -16,15 +16,14 @@ import concurrent.futures
 
 
 # <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
-dashscope.api_key = 
-os.environ["OPENAI_API_KEY"] = 
+dashscope.api_key = 'sk-'
+os.environ["OPENAI_API_KEY"] = "sk-proj-"
 openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
 output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_RAG_236"
 os.makedirs(output_dir, exist_ok=True)
 detections_path = os.path.join(output_dir, "detections_coco.json")
-steps_path = os.path.join(output_dir, "steps_predictions.json")
 done_images_file = os.path.join(output_dir, "done_images.txt")
 
 # </editor-fold>
@@ -40,26 +39,30 @@ else:
 images_info = []
 annotations = []
 
-coco_detections = []
 annotation_id_counter = 0
 # </editor-fold>
 
 # <editor-fold desc=" 1.3 Initialization: COCO categories and labels">
 CATEGORY_MAP = {
     # instruments
-    "Bipolar Forceps": 1,
-    "Monopolar Scissors": 2,
-    "Suction Irrigator": 3,
-    "Needle Driver": 4,
-    "Cautery Hook": 5,
-    "UnclearInstrument": 6,
+    "Bipolar Forceps": 0,
+    "Monopolar Scissors": 6,
+    "Suction Irrigator": 10,
+    "Needle Driver": 7,
+    "Cautery Hook": 3,
+    "UnclearInstrument": 12,
     # tissues
-    "Uterus": 101,
-    "Ovaries": 102,
-    "Fallopian Tubes": 103,
-    "Bladder": 104,
-    "Ureter": 105,
-    "UnclearBodyTissue": 106,
+    "Uterus": 14,
+    "Ovaries": 8,
+    "Fallopian Tubes": 5,
+    "Bladder": 1,
+    "Ureter": 13,
+    "UnclearBodyTissue": 11,
+    # steps
+    "Preparation & Exposure": 9,
+    "Dissection & Vessel Control": 4,
+    "Uterus Removal & Closure": 15,
+    "Bleeding Area": 2
 }
 
 INSTRUMENT_LABELS = {
@@ -246,6 +249,7 @@ def process_image(image_file: str):
         print(f"🔄 Skip {image_file} (cached)")
         return None
 
+    local_annotations = []
     image_path = os.path.join(image_dir, image_file)
     # (3) Prepare local COCO and step prediction structures
     local_step = {
@@ -267,7 +271,7 @@ def process_image(image_file: str):
             with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
                 lf.write(f"{image_id}\tread_image_error\t{e}\n")
             # Return placeholder
-            return image_id, annotations, local_step
+            return image_id, local_annotations, local_step
 
         img_pil = Image.open(image_path)
         width, height = img_pil.size
@@ -359,7 +363,7 @@ def process_image(image_file: str):
 
                 if cat_id is not None:
                     area = bbox_xywh[2] * bbox_xywh[3]  # width * height
-                    annotations.append({
+                    local_annotations.append({
                         "id": annotation_id_counter,
                         "image_id": int(image_id),
                         "category_id": cat_id,
@@ -381,7 +385,7 @@ def process_image(image_file: str):
                 lf.write(f"{image_id}\tVisualization_error\t{e}\n")
 
         # (4) Finalize and return results
-        return image_id, annotations, local_step
+        return image_id, local_annotations, local_step
 
     except Exception as e:
         # Deal with unexpected errors
@@ -389,7 +393,7 @@ def process_image(image_file: str):
         with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
             lf.write(f"{image_id}\touter_try_except\t{e}\n")
         # Return placeholder
-        return image_id, annotations, local_step
+        return image_id, local_annotations, local_step
 
 def extract_id(fname):
     m = re.match(r'(\d+)', os.path.splitext(fname)[0])
@@ -419,20 +423,20 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         image_id, coco_list, step_dict = res
 
         # (1) Update global lists
-        coco_detections.extend(coco_list)
+        annotations.extend(coco_list)
 
         # (2) Write outputs to JSON files
-        try:
-            with open(detections_path, "w", encoding="utf-8") as f:
-                json.dump(coco_detections, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"⚠️ Failed to write detections JSON: {e}")
-            try:
-                log_path = os.path.join(output_dir, "failure_log.txt")
-                with open(log_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"{image_id}\tDetections_JSON_writing_error\t{e}\n")
-            except Exception:
-                pass
+        # try:
+        #     with open(detections_path, "w", encoding="utf-8") as f:
+        #         json.dump(coco_detections, f, ensure_ascii=False, indent=2)
+        # except Exception as e:
+        #     print(f"⚠️ Failed to write detections JSON: {e}")
+        #     try:
+        #         log_path = os.path.join(output_dir, "failure_log.txt")
+        #         with open(log_path, "a", encoding="utf-8") as lf:
+        #             lf.write(f"{image_id}\tDetections_JSON_writing_error\t{e}\n")
+        #     except Exception:
+        #         pass
 
 
         # (3) Cache the processed image
@@ -451,8 +455,9 @@ coco_categories = [
 
 coco_output = {
     "images": images_info,
-    "annotations": annotations,
-    "categories": coco_categories
+    "categories": coco_categories,
+    "annotations": annotations
+
 }
 with open(detections_path, "w", encoding="utf-8") as f:
     json.dump(coco_output, f, ensure_ascii=False, indent=2)
