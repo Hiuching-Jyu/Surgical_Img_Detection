@@ -18,6 +18,7 @@ import concurrent.futures
 # <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
 dashscope.api_key = 
 os.environ["OPENAI_API_KEY"] = 
+openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
 output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_RAG_236"
@@ -36,6 +37,7 @@ else:
     done_images = set()
 
 # Collect all detections and step predictions
+annotation_id_counter = 0
 coco_detections = []
 step_predictions = []
 # </editor-fold>
@@ -432,6 +434,8 @@ def process_image(image_file: str):
                 max_tokens=2000,
                 model="gpt-4o-mini"
             )
+
+
             if isinstance(parsed, dict) and isinstance(parsed.get("bboxes"), list):
                 bboxes = parsed["bboxes"]
             else:
@@ -494,6 +498,10 @@ def process_image(image_file: str):
             for b in bboxes:
                 x1, y1 = parse_coord(b.get("x1")), parse_coord(b.get("y1"))
                 x2, y2 = parse_coord(b.get("x2")), parse_coord(b.get("y2"))
+
+                x1, x2 = sorted((x1, x2))
+                y1, y2 = sorted((y1, y2))
+
                 cat_id = label_to_category_id(b.get("label",""))
                 if cat_id is not None:
                     local_coco.append({
@@ -525,12 +533,26 @@ def process_image(image_file: str):
         # Return placeholder
         return image_id, local_coco, local_step
 
+def extract_id(fname):
+    m = re.match(r'(\d+)', os.path.splitext(fname)[0])
+    return int(m.group(1)) if m else 0
+
 
 # === Main processing loop with ThreadPoolExecutor ===
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+
+all_images = [
+    f for f in os.listdir(image_dir)
+    if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+]
+
+image_files_sorted = sorted(all_images, key=extract_id)
+
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
     futures = {
         executor.submit(process_image, img): img
-        for img in os.listdir(image_dir)
+        for img in image_files_sorted
     }
     for fut in concurrent.futures.as_completed(futures):
         res = fut.result()
