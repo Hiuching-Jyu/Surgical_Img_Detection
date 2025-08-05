@@ -5,31 +5,64 @@ import re
 import json
 from PIL import Image, ImageDraw, ImageFont
 import base64
-# from rag_module import retrieve_step_by_rag   # ← removed: no RAG
+from rag_module import retrieve_step_by_rag
+import os
+import json
+from typing import Optional
+from openai import OpenAI
+import os
+import concurrent.futures
 
-# <editor-fold desc=" 1. Initialization for API-Key and dirs">
-dashscope.api_key = 'sk-8694ac696f1c42aba2f1cfb254a5918d'  # Replace with your key
+
+
+# <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
+dashscope.api_key = 'sk-'
+os.environ["OPENAI_API_KEY"] = "sk-proj-"
+openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
 output_dir = "/home/hiuching-g/PRHK/Output/Output_QWen_steps_withoutRAG_236"
 os.makedirs(output_dir, exist_ok=True)
+detections_path = os.path.join(output_dir, "detections_coco.json")
+done_images_file = os.path.join(output_dir, "done_images.txt")
 
-# === COCO category mapping (IDs are stable and unique) ===
+# </editor-fold>
+# <editor-fold desc=" 1.2 Initialization: Find done images and prepare COCO categories">
+# Read done images from file， if it exists
+if os.path.exists(done_images_file):
+    with open(done_images_file, "r", encoding="utf-8") as f:
+        done_images = set(line.strip() for line in f if line.strip())
+else:
+    done_images = set()
+
+# Collect all detections and step predictions
+images_info = []
+annotations = []
+
+annotation_id_counter = 0
+# </editor-fold>
+
+# <editor-fold desc=" 1.3 Initialization: COCO categories and labels">
 CATEGORY_MAP = {
     # instruments
-    "Bipolar Forceps": 1,
-    "Monopolar Scissors": 2,
-    "Suction Irrigator": 3,
-    "Needle Driver": 4,
-    "Cautery Hook": 5,
-    "UnclearInstrument": 6,
+    "Bipolar Forceps": 0,
+    "Monopolar Scissors": 6,
+    "Suction Irrigator": 10,
+    "Needle Driver": 7,
+    "Cautery Hook": 3,
+    "UnclearInstrument": 12,
     # tissues
-    "Uterus": 101,
-    "Ovaries": 102,
-    "Fallopian Tubes": 103,
-    "Bladder": 104,
-    "Ureter": 105,
-    "UnclearBodyTissue": 106,
+    "Uterus": 14,
+    "Ovaries": 8,
+    "Fallopian Tubes": 5,
+    "Bladder": 1,
+    "Ureter": 13,
+    "UnclearBodyTissue": 11,
+    # steps
+    "Preparation & Exposure": 9,
+    "Dissection & Vessel Control": 4,
+    "Uterus Removal & Closure": 15,
+    "Bleeding Area": 2
 }
 
 INSTRUMENT_LABELS = {
@@ -54,15 +87,15 @@ input_text = (
     "- Suction Irrigator\n"
     "- Needle Driver\n"
     "- Cautery Hook\n"
-    "- UnclearInstrument (if not identifiable)\n\n"
+    "- UnclearInstrument\n\n"
     "2. Detect and localize **body tissues**. For each bounding box, choose only the most likely label for each tissue object from the following options:\n"
     "- Uterus\n"
     "- Ovaries\n"
     "- Fallopian Tubes\n"
     "- Bladder\n"
     "- Ureter\n"
-    "- UnclearBodyTissue (if not identifiable)\n\n"
-    "Make sure you respond in **JSON only**, and ensure the format is correct:\n"
+    "- UnclearBodyTissue\n\n"
+    "Make sure you respond in **JSON only** and **strictly follow the following format, no sign changed**:\n"
     "{\n"
     "  \"bboxes\": [\n"
     "    {\"label\": \"<specific label>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
@@ -71,15 +104,20 @@ input_text = (
     "}\n\n"
     "Try to identify at least 3 items for an image.\n"
 )
+# </editor-fold>
+# <editor-fold desc=" 2.1 Functions Setup: Helper functions for bbox and step processing">
 
-# === helpers ===
 def xyxy_to_xywh(x1, y1, x2, y2):
-    x = min(x1, x2); y = min(y1, y2)
-    w = max(0, abs(x2 - x1)); h = max(0, abs(y2 - y1))
+    x = min(x1, x2)
+    y = min(y1, y2)
+    w = max(0, abs(x2 - x1))
+    h = max(0, abs(y2 - y1))
     return [int(x), int(y), int(w), int(h)]
+
 
 def label_to_category_id(label: str):
     return CATEGORY_MAP.get(label, None)
+
 
 def safe_float(v, default=1.0):
     try:
@@ -87,164 +125,232 @@ def safe_float(v, default=1.0):
     except Exception:
         return default
 
+
 def extract_json_block(text: str) -> str:
     if not text:
         return ""
     m = re.search(r'\{[\s\S]*\}', text)
     return m.group(0) if m else ""
 
-def try_parse_json(s: str):
-    if not s:
-        return None
-    t = s.strip()
-    # tolerant cleanup
-    t = re.sub(r',(\s*[}\]])', r'\1', t)                         # trailing comma
-    t = re.sub(r'([{,]\s*)([A-Za-z_]\w*)(\s*):', r'\1"\2"\3:', t) # unquoted keys
-    t = re.sub(r"(?<!\\)'", '"', t)                              # single -> double quotes
+# </editor-fold>
+
+
+# <editor-fold desc=" 2.2 Functions Setup: Qwen bbox and OpenAI JSON fixing functions">
+# === 2.2.1 Qwen bbox and OpenAI JSON fixing functions ===
+def call_qwen_bbox(image_path: str, input_text: str, temperature: float = 0.4, timeout: int = 90) -> str:
+    """Only call Qwen to get raw bbox text."""
+    messages_bbox = [{"role": "user", "content": [{"image": image_path}, {"text": input_text}]}]
+    resp = MultiModalConversation.call(
+        model='qwen-vl-plus',
+        messages=messages_bbox,
+        temperature=temperature,
+        result_format="message",
+        vl_high_resolution_images=True,
+        timeout=timeout
+    )
+    txt = resp.output.choices[0].message.content if resp and resp.output else ""
+    if isinstance(txt, list):
+        txt = txt[0].get("text", "")
+    elif isinstance(txt, dict):
+        txt = txt.get("text", "")
+    return txt or ""
+
+
+# === 2.2.2 OpenAI JSON fixing function ===
+def fix_bbox_json_with_openai(text: str, max_tokens: int = 2000, model: str = "gpt-4o-mini") -> Optional[dict]:
+    """Call OpenAI to fix the bbox JSON text into valid JSON dict."""
+    if "OPENAI_API_KEY" not in os.environ:
+        raise RuntimeError("OPENAI_API_KEY is not set. Configure it in Run/Debug Configurations.")
+
+
+
+    system = (
+        "You are a strict JSON fixer. Return ONLY valid, minified JSON with no comments or markdown. "
+        "Target schema: {\"bboxes\":[{\"label\":string,\"x1\":int,\"y1\":int,\"x2\":int,\"y2\":int}]}. "
+        "Fix key quoting, replace any '=' with ':', remove trailing commas, and drop unknown keys. "
+        "If you must guess numeric values, keep them integers. Never add text outside JSON."
+    )
+    user = (
+        "Fix this into valid JSON following the schema exactly. If it already fits, just return it as-is:\n"
+        f"{text}"
+    )
+
     try:
-        return json.loads(t)
-    except Exception:
+        # Apply openai SDK
+        resp = openai_client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0,
+            max_output_tokens=max_tokens,
+        )
+        fixed_text = resp.output_text or ""
+        # Clean up code block markers if any
+        fixed_text = fixed_text.strip()
+        if fixed_text.startswith("```"):
+            fixed_text = fixed_text.strip("`")
+            # If it starts with "json", remove that too
+            if fixed_text.startswith("json"):
+                fixed_text = fixed_text[len("json"):].lstrip()
+
+        # Try to parse the JSON
+        data = json.loads(fixed_text)
+        if isinstance(data, dict) and isinstance(data.get("bboxes"), list):
+            return data
+        return None
+    except Exception as e:
+        print(f"⚠️ OpenAI fix failed: {e}")
         return None
 
-# collectors
-coco_detections = []
-step_predictions = []
+
+# === 2.2.3 Clean and fix bbox JSON function ===
+def clean_and_fix_bbox_json(text: str) -> str:
+    if not text:
+        return {}
+
+    # 1) Remove code block markers
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE | re.MULTILINE)
+
+    # 2) Find the JSON block
+    js = extract_json_block(text)
+
+    if not js:
+        return {}
+
+    # 3) Fix common JSON formatting issues, e.g.:
+    #   Transform "key", "value" -> "key": "value"
+    js = re.sub(r'"(\w+)"\s*,\s*"(-?\d+\.?\d*)"', r'"\1": \2', js)
+    #   Transform "key", "value" -> "key": "value"
+    js = re.sub(r'"(\w+)"\s*,\s*"([^"]*?)"', r'"\1": "\2"', js)
+    js = re.sub(r'(?<!")\b(x1|y1|x2|y2)\b\s*=\s*', r'"\1": ', js)
+    js = re.sub(r'(?<!")\b(x1|y1|x2|y2)\b\s*:\s*', r'"\1": ', js)
+
+    # 4) Remove trailing commas before closing brackets
+    js = re.sub(r',(\s*[}\]])', r'\1', js)
+
+    return js
+
 
 # </editor-fold>
 
-for image_file in os.listdir(image_dir):
+
+def process_image(image_file: str):
+    global annotation_id_counter
+
+    # (1) Check if the file is an image
+    if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+        return None
+
+    image_id = os.path.splitext(image_file)[0].split("_")[0]
+    # (2) Check if the image has been processed before
+    if image_id in done_images:
+        print(f"🔄 Skip {image_file} (cached)")
+        return None
+
+    local_annotations = []
+    image_path = os.path.join(image_dir, image_file)
+    # (3) Prepare local COCO and step prediction structures
+    local_step = {
+        "image_id": image_id,
+        "step_top1": "Unknown",
+        "step_probs": {k: 1/3 for k in STEP_LABELS},
+        "note": "error_or_skip"
+    }
+
     try:
-        if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
-            continue
-
-        image_path = os.path.join(image_dir, image_file)
-        # image_id = image_file
-        image_id = os.path.splitext(image_file)[0].split("_")[0]   # keep only the 'xxx' part
         print(f"\n🔍 Processing {image_file}...")
-
-        # Read image (skip if failed)
+        # === MAIN PROCESSING STEPS ===
+        # === 0) Read image
         try:
             with open(image_path, "rb") as f:
-                base64_image = base64.b64encode(f.read()).decode("utf-8")
+                _ = base64.b64encode(f.read()).decode("utf-8")
         except Exception as e:
-            print(f"⚠️ Cannot read image {image_path}: {e}. Skipping.")
-            step_predictions.append({
-                "image_id": image_id,
-                "step_top1": "Unknown",
-                "step_probs": {
-                    "Preparation & Exposure": 1/3,
-                    "Dissection & Vessel Control": 1/3,
-                    "Uterus Removal & Closure": 1/3
-                },
-                "note": "image_read_fail"
-            })
-            continue
+            print(f"⚠️ Cannot read image: {e}")
+            with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
+                lf.write(f"{image_id}\tread_image_error\t{e}\n")
+            # Return placeholder
+            return image_id, local_annotations, local_step
 
-        # === 1) Qwen for bboxes (unchanged) ===
+        img_pil = Image.open(image_path)
+        width, height = img_pil.size
+
+        # append to images_info (COCO format)
+        images_info.append({
+            "id": int(image_id),  # must be int
+            "width": width,
+            "height": height,
+            "file_name": os.path.join(image_dir, image_file)
+        })
+
+        # === 1) BBOX Prediction===
         bboxes = []
         try:
-            messages_bbox = [{"role": "user", "content": [{"image": image_path}, {"text": input_text}]}]
-            response_bbox = MultiModalConversation.call(
+            parsed = fix_bbox_json_with_openai(
+                call_qwen_bbox(image_path, input_text, temperature=0.0, timeout=90),
+                max_tokens=2000,
+                model="gpt-4o-mini"
+            )
+
+
+            if isinstance(parsed, dict) and isinstance(parsed.get("bboxes"), list):
+                bboxes = parsed["bboxes"]
+            else:
+                print("⚠️ No valid 'bboxes'; skipping boxes.")
+        except Exception as e:
+            print(f"⚠️ BBOX error: {e}")
+            with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
+                lf.write(f"{image_id}\tBBOX_pred_error\t{e}\n")
+
+        # === 2) Qwen Step Prediction (替代 RAG) ===
+        try:
+            step_prompt = (
+                "Please describe what step the robotic hysterectomy procedure is in. "
+                "Choose only one from the following steps:\n"
+                "- Preparation & Exposure\n"
+                "- Dissection & Vessel Control\n"
+                "- Uterus Removal & Closure\n\n"
+                "Respond with only the step name."
+            )
+            resp = MultiModalConversation.call(
                 model='qwen-vl-plus',
-                messages=messages_bbox,
+                messages=[{"role": "user", "content": [{"image": image_path}, {"text": step_prompt}]}],
                 temperature=0.4,
                 result_format="message",
                 vl_high_resolution_images=True,
                 timeout=90
             )
-            response_text = response_bbox.output.choices[0].message.content if response_bbox and response_bbox.output else ""
-            if isinstance(response_text, list):
-                response_text = response_text[0].get("text", "")
-            elif isinstance(response_text, dict):
-                response_text = response_text.get("text", "")
-            json_str = extract_json_block(response_text)
-            parsed = try_parse_json(json_str)
-            if parsed and isinstance(parsed, dict):
-                bboxes = parsed.get("bboxes", [])
-            else:
-                print("⚠️ JSON parsing failed (bbox).")
-        except Exception as e:
-            print(f"⚠️ BBOX prediction error: {e}. Continue without boxes.")
+            step_resp = resp.output.choices[0].message.content if resp and resp.output else ""
+            if isinstance(step_resp, list):
+                step_resp = step_resp[0].get("text", "")
+            elif isinstance(step_resp, dict):
+                step_resp = step_resp.get("text", "")
 
-        # === 2) Qwen for STEP (RAG removed; Qwen outputs step JSON directly) ===
-        step_name = "Unknown"
-        step_probs = {k: 0.0 for k in STEP_LABELS}
-        try:
-            # Ask Qwen to return step in strict JSON
-            step_prompt = (
-                "You are an expert in hysterectomy. "
-                "Given the image, classify the current surgical step. "
-                "Return JSON ONLY with this exact schema:\n"
-                "{\n"
-                "  \"step_top1\": \"<one of: Preparation & Exposure | Dissection & Vessel Control | Uterus Removal & Closure>\",\n"
-                "  \"step_probs\": {\n"
-                "    \"Preparation & Exposure\": float,\n"
-                "    \"Dissection & Vessel Control\": float,\n"
-                "    \"Uterus Removal & Closure\": float\n"
-                "  }\n"
-                "}\n"
-                "Probabilities should sum to 1. No extra text."
-            )
-            messages_step = [{"role": "user", "content": [{"image": image_path}, {"text": step_prompt}]}]
-            response_step = MultiModalConversation.call(
-                model='qwen-vl-plus',
-                messages=messages_step,
-                temperature=0.2,                 # lower temperature for stable JSON/probs
-                result_format="message",
-                vl_high_resolution_images=True,
-                timeout=90
-            )
-            step_text = response_step.output.choices[0].message.content if response_step and response_step.output else ""
-            if isinstance(step_text, list):
-                step_text = step_text[0].get("text", "")
-            elif isinstance(step_text, dict):
-                step_text = step_text.get("text", "")
-
-            step_json = try_parse_json(extract_json_block(step_text))
-            if isinstance(step_json, dict):
-                # read top1 and probs if present
-                cand = step_json.get("step_top1")
-                probs = step_json.get("step_probs", {})
-                if isinstance(cand, str) and cand in STEP_LABELS:
-                    step_name = cand
-                # validate probs
-                if isinstance(probs, dict):
-                    for k in STEP_LABELS:
-                        v = probs.get(k, 0.0)
-                        try:
-                            step_probs[k] = float(v)
-                        except Exception:
-                            step_probs[k] = 0.0
-                # if probs invalid, fallback to one-hot
-                if sum(step_probs.values()) <= 0:
-                    step_probs = {k: 0.0 for k in STEP_LABELS}
-                    if step_name in step_probs:
-                        step_probs[step_name] = 1.0
-            else:
-                # fallback: one-hot Unknown
+            step_name = None
+            for label in STEP_LABELS:
+                if label.lower() in step_resp.lower():
+                    step_name = label
+                    break
+            if not step_name:
                 step_name = "Unknown"
-                step_probs = {
-                    "Preparation & Exposure": 1/3,
-                    "Dissection & Vessel Control": 1/3,
-                    "Uterus Removal & Closure": 1/3
-                }
-        except Exception as e:
-            print(f"⚠️ Step prediction error: {e}. Use fallback.")
-            step_name = "Unknown"
-            step_probs = {
-                "Preparation & Exposure": 1/3,
-                "Dissection & Vessel Control": 1/3,
-                "Uterus Removal & Closure": 1/3
+
+            # one-hot
+            step_probs = {k: 0.0 for k in STEP_LABELS}
+            if step_name in step_probs:
+                step_probs[step_name] = 1.0
+            local_step = {
+                "image_id": image_id,
+                "step_top1": step_name,
+                "step_probs": step_probs
             }
 
-        # record step prediction (same structure as before)
-        step_predictions.append({
-            "image_id": image_id,
-            "step_top1": step_name,
-            "step_probs": step_probs
-        })
+        except Exception as e:
+            print(f"⚠️ Step/Qwen error: {e}")
+            with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
+                lf.write(f"{image_id}\tStep_in_Qwen_error\t{e}\n")
 
-        # === 3) Visualization & COCO detections (unchanged) ===
+        # === 3) Visualization and COCO conversion ===
         try:
             img = Image.open(image_path).convert("RGB")
             draw = ImageDraw.Draw(img)
@@ -252,85 +358,106 @@ for image_file in os.listdir(image_dir):
             font_lar = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
 
             def parse_coord(val):
-                if isinstance(val, int): return val
-                if isinstance(val, float): return int(val)
+                if isinstance(val, (int, float)): return int(val)
                 if isinstance(val, list) and val:
-                    try: return int(float(val[0]))
-                    except Exception: return 0
+                    return int(float(val[0])) if str(val[0]).replace('.','',1).isdigit() else 0
                 if isinstance(val, str):
-                    nums = re.findall(r'-?\d+\.?\d*', val)
-                    try: return int(float(nums[0])) if nums else 0
-                    except Exception: return 0
+                    m = re.search(r'-?\d+\.?\d*', val)
+                    return int(float(m.group())) if m else 0
                 return 0
 
-            for box in bboxes:
-                try:
-                    x1 = parse_coord(box.get("x1"))
-                    y1 = parse_coord(box.get("y1"))
-                    x2 = parse_coord(box.get("x2"))
-                    y2 = parse_coord(box.get("y2"))
-                    label = box.get("label", "Unknown")
+            for b in bboxes:
+                x1, y1 = parse_coord(b.get("x1")), parse_coord(b.get("y1"))
+                x2, y2 = parse_coord(b.get("x2")), parse_coord(b.get("y2"))
+                x1, x2 = sorted((x1, x2))
+                y1, y2 = sorted((y1, y2))
+                bbox_xywh = xyxy_to_xywh(x1, y1, x2, y2)
+                cat_id = label_to_category_id(b.get("label", ""))
 
-                    xywh = xyxy_to_xywh(x1, y1, x2, y2)
-                    cat_id = label_to_category_id(label)
-                    score = safe_float(box.get("score", 1.0))
+                if cat_id is not None:
+                    area = bbox_xywh[2] * bbox_xywh[3]  # width * height
+                    local_annotations.append({
+                        "id": annotation_id_counter,
+                        "image_id": int(image_id),
+                        "category_id": cat_id,
+                        "bbox": bbox_xywh,
+                        "area": area,
+                        "iscrowd": 0,
+                        "segmentation": []  # leave empty for bbox-only COCO
+                    })
+                    annotation_id_counter += 1
+                color = "green" if any(t in b["label"].lower() for t in ["uterus","ovaries","tubes","bladder","ureter"]) else "red"
+                draw.rectangle([x1,y1,x2,y2], outline=color, width=3)
+                draw.text((x1, max(y1-12,0)), b.get("label",""), fill=color, font=font_def)
 
-                    if cat_id is None:
-                        print(f"⚠️ Unknown label '{label}' — skipping COCO record.")
-                    else:
-                        coco_detections.append({
-                            "image_id": image_id,
-                            "category_id": cat_id,
-                            "category_name": label,
-                            "bbox": xywh,
-                            "score": score
-                        })
-
-                    color = "green" if any(
-                        k in label.lower() for k in ["uterus", "ovaries", "tubes", "bladder", "ureter"]) else "red"
-                    draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-                    draw.text((x1, max(y1 - 12, 0)), label, fill=color, font=font_def)
-                except Exception as e:
-                    print(f"⚠️ Failed to draw/record box: {box}, Error: {e}")
-
-            draw.text((50, 20), f"Step: {step_name}", fill="blue", font=font_lar)
-            output_path = os.path.join(output_dir, f"annotated_{image_file}")
-            try:
-                img.save(output_path)
-                print(f"✅ Annotated image saved to: {output_path}")
-            except Exception as e:
-                print(f"⚠️ Failed to save annotated image for {image_file}: {e}")
+            draw.text((50,20), f"Step: {local_step['step_top1']}", fill="blue", font=font_lar)
+            img.save(os.path.join(output_dir, f"annotated_{image_file}"))
         except Exception as e:
-            print(f"⚠️ Visualization error on {image_file}: {e}. Continue.")
+            print(f"⚠️ Visualization error: {e}")
+            with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
+                lf.write(f"{image_id}\tVisualization_error\t{e}\n")
+
+        # (4) Finalize and return results
+        return image_id, local_annotations, local_step
 
     except Exception as e:
-        print(f"❌ Unexpected error for {image_file}: {e}. Skipping this image.")
-        step_predictions.append({
-            "image_id": image_file,
-            "step_top1": "Unknown",
-            "step_probs": {
-                "Preparation & Exposure": 1/3,
-                "Dissection & Vessel Control": 1/3,
-                "Uterus Removal & Closure": 1/3
-            },
-            "note": "outer_try_except"
-        })
-        continue
+        # Deal with unexpected errors
+        print(f"❌ Unexpected error for {image_file}: {e}")
+        with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
+            lf.write(f"{image_id}\touter_try_except\t{e}\n")
+        # Return placeholder
+        return image_id, local_annotations, local_step
+
+def extract_id(fname):
+    m = re.match(r'(\d+)', os.path.splitext(fname)[0])
+    return int(m.group(1)) if m else 0
+
+
+# === Main processing loop with ThreadPoolExecutor ===
+
+all_images = [
+    f for f in os.listdir(image_dir)
+    if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+]
+
+image_files_sorted = sorted(all_images, key=extract_id)
+
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    futures = {
+        executor.submit(process_image, img): img
+        for img in image_files_sorted
+    }
+    for fut in concurrent.futures.as_completed(futures):
+        res = fut.result()
+        if not res:
+            continue
+        image_id, coco_list, step_dict = res
+
+        # (1) Update global lists
+        annotations.extend(coco_list)
+
+
+        # (3) Cache the processed image
+        with open(done_images_file, "a", encoding="utf-8") as f:
+            f.write(image_id + "\n")
+
+        print(f"💾 Done {image_id}: outputs updated, cached.")
+
 
 # === After processing all images: write outputs ===
-detections_path = os.path.join(output_dir, "detections_coco.json")
-steps_path = os.path.join(output_dir, "steps_predictions.json")
 
-try:
-    with open(detections_path, "w", encoding="utf-8") as f:
-        json.dump(coco_detections, f, ensure_ascii=False, indent=2)
-    print(f"💾 COCO detections written to: {detections_path}")
-except Exception as e:
-    print(f"⚠️ Failed to write detections JSON: {e}")
+coco_categories = [
+    {"id": v, "name": k, "supercategory": "instrument" if k in INSTRUMENT_LABELS else "tissue"}
+    for k, v in CATEGORY_MAP.items()
+]
 
-try:
-    with open(steps_path, "w", encoding="utf-8") as f:
-        json.dump(step_predictions, f, ensure_ascii=False, indent=2)
-    print(f"💾 Step predictions written to: {steps_path}")
-except Exception as e:
-    print(f"⚠️ Failed to write steps JSON: {e}")
+coco_output = {
+    "images": images_info,
+    "categories": coco_categories,
+    "annotations": annotations
+
+}
+with open(detections_path, "w", encoding="utf-8") as f:
+    json.dump(coco_output, f, ensure_ascii=False, indent=2)
