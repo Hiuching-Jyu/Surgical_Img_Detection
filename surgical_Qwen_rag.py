@@ -16,6 +16,8 @@ import concurrent.futures
 
 
 # <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
+dashscope.api_key = 
+os.environ["OPENAI_API_KEY"] = 
 openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
@@ -39,7 +41,6 @@ images_info = []
 annotations = []
 
 coco_detections = []
-step_predictions = []
 annotation_id_counter = 0
 # </editor-fold>
 
@@ -419,7 +420,6 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
 
         # (1) Update global lists
         coco_detections.extend(coco_list)
-        step_predictions.append(step_dict)
 
         # (2) Write outputs to JSON files
         try:
@@ -433,8 +433,7 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                     lf.write(f"{image_id}\tDetections_JSON_writing_error\t{e}\n")
             except Exception:
                 pass
-        with open(steps_path, "w", encoding="utf-8") as f:
-            json.dump(step_predictions, f, ensure_ascii=False, indent=2)
+
 
         # (3) Cache the processed image
         with open(done_images_file, "a", encoding="utf-8") as f:
@@ -457,16 +456,3 @@ coco_output = {
 }
 with open(detections_path, "w", encoding="utf-8") as f:
     json.dump(coco_output, f, ensure_ascii=False, indent=2)
-
-try:
-    with open(steps_path, "w", encoding="utf-8") as f:
-        json.dump(step_predictions, f, ensure_ascii=False, indent=2)
-    print(f"💾 Step predictions written to: {steps_path}")
-except Exception as e:
-    print(f"⚠️ Failed to write steps JSON: {e}")
-    try:
-        log_path = os.path.join(output_dir, "failure_log.txt")
-        with open(log_path, "a", encoding="utf-8") as lf:
-            lf.write(f"{image_id}\tSteps_JSON_writing_error\t{e}\n")
-    except Exception:
-        pass
