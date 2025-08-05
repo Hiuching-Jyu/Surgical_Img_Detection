@@ -16,8 +16,6 @@ import concurrent.futures
 
 
 # <editor-fold desc=" 1.1 Initialization: API-Key and dirs">
-dashscope.api_key = 
-os.environ["OPENAI_API_KEY"] = 
 openai_client = OpenAI()
 
 image_dir = "/home/hiuching-g/PRHK/test_images_236"
@@ -37,9 +35,12 @@ else:
     done_images = set()
 
 # Collect all detections and step predictions
-annotation_id_counter = 0
+images_info = []
+annotations = []
+
 coco_detections = []
 step_predictions = []
+annotation_id_counter = 0
 # </editor-fold>
 
 # <editor-fold desc=" 1.3 Initialization: COCO categories and labels">
@@ -200,120 +201,7 @@ def fix_bbox_json_with_openai(text: str, max_tokens: int = 2000, model: str = "g
         return None
 
 
-# === 2.2.3 Manual fixing function ===
-def get_bboxes_with_manual_fix(image_path: str,
-                               input_text: str,
-                               output_dir: str,
-                               image_id: str,
-                               cleaned_preview: bool = True) -> dict:
-    """
-    Only used when the automatic JSON parsing fails.
-    """
-    # 1) Call Qwen to get the raw bbox text
-    raw_text = call_qwen_bbox(image_path, input_text)
-    print(f"📦 BBOX response (first try): {raw_text}")
-
-    clean_text = clean_and_fix_bbox_json(raw_text)
-    print("📦 Cleaned BBOX JSON:", clean_text)
-    # 2) If cleaned_text is empty, we need manual fixing
-    dbg_dir = os.path.join(output_dir, "debug_bbox_cleaned")
-    os.makedirs(dbg_dir, exist_ok=True)
-    cand_path = os.path.join(dbg_dir, f"{image_id}.json")
-    with open(cand_path, "w", encoding="utf-8") as f:
-        f.write(clean_text)
-
-    # 3)
-
-    print("\n📝 Please mannully fix the bbox JSON file in editor. \n")
-    print(f"    {cand_path}")
-    print("   After saving the file, return here and press Enter to re-parse it, or enter skip.")
-
-    # 4) ready to parse the edited file
-    while True:
-        user_in = input("[Waiting for your input] Press Enter to re-parse, or type 'skip' to skip this image: ").strip().lower()
-        if user_in == "skip":
-            print("⏭️ Skip this image")
-            return {}
-
-        # Read the edited file
-        try:
-            with open(cand_path, "r", encoding="utf-8") as f:
-                edited_text = f.read()
-        except Exception as e:
-            print(f"⚠️ Read error: {e}. Please make sure the file is accessible.")
-            continue
-
-        parsed = json.loads(edited_text)
-        # parsed = clean_and_fix_bbox_json(edited_text)
-        if isinstance(parsed, dict) and isinstance(parsed.get("bboxes"), list):
-            print("✅ Successfully parsed the edited JSON.")
-            return parsed
-
-        # If still not valid, show error context
-        from json import JSONDecodeError
-        try:
-            # Use json.loads to find the error position
-            json.loads(edited_text)
-        except JSONDecodeError as e:
-            start = max(e.pos - 40, 0)
-            end = min(e.pos + 40, len(edited_text))
-            snippet = edited_text[start:end]
-            print(f"❌ Still have illegal {e.msg} @ line {e.lineno}, col {e.colno}")
-            print("Relavent content", repr(snippet))
-        except Exception as e:
-            print(f"❌ Not JSONDecodeError：{e}")
-
-        print("Please correct the json file in editor and try again, or input 'skip' to skip this image.")
-
-
-# === 2.2.4 Retry function for bbox parsing ===
-def get_bboxes_with_retry(image_path: str, input_text: str, retries: int = 1) -> dict:
-    """Call Qwen bbox with retries to get valid JSON."""
-
-    resp_text = call_qwen_bbox(image_path, input_text)
-    print(f"📦 BBOX response: {resp_text}")
-    parsed = clean_and_fix_bbox_json(resp_text)
-    if isinstance(parsed, dict) and parsed.get("bboxes"):
-        return parsed
-
-    # retry
-    retry_text = (
-    """ Please verify your JSON format and ensure it strictly follows the specified structure. **Only respond with JSON, no other text**
-        "{\n"
-    "  \"bboxes\": [\n"
-    "    {\"label\": \"<specific label>\", \"x1\": int, \"y1\": int, \"x2\": int, \"y2\": int},\n"
-    "    ...\n"
-    "  ]\n"
-    "}\n\n"
-    """)
-
-    for i in range(retries):
-        print(f"⚠️ JSON parsing failed (bbox). Retrying {i+1}/{retries} ...")
-        resp_text = call_qwen_bbox(image_path, retry_text+resp_text)
-        print(f"📦 BBOX response (retry {i+1}): {resp_text}")
-        parsed = clean_and_fix_bbox_json(resp_text)
-        if isinstance(parsed, dict) and parsed.get("bboxes"):
-            return parsed
-
-    return {}
-
-
-# === 2.2.5 Parse JSON function ===
-def try_parse_json(s: str):
-    if not s:
-        return None
-    t = s.strip()
-    # clean up common JSON issues
-    t = re.sub(r',(\s*[}\]])', r'\1', t)
-    t = re.sub(r'([{,]\s*)([A-Za-z_]\w*)(\s*):', r'\1"\2"\3:', t)
-    t = re.sub(r"(?<!\\)'", '"', t)
-    try:
-        return json.loads(t)
-    except Exception:
-        return None
-
-
-# === 2.2.6 Clean and fix bbox JSON function ===
+# === 2.2.3 Clean and fix bbox JSON function ===
 def clean_and_fix_bbox_json(text: str) -> str:
     if not text:
         return {}
@@ -339,59 +227,14 @@ def clean_and_fix_bbox_json(text: str) -> str:
     js = re.sub(r',(\s*[}\]])', r'\1', js)
 
     return js
-    # # 5) Parse the JSON
-    # data = try_parse_json(js)
-    # if not isinstance(data, dict):
-    #     print("⚠️ Failed to parse JSON after cleaning.\n")
-    #     print("The cleaned JSON was:\n", js)
-    #     try:
-    #         log_path = os.path.join(output_dir, "failure_log.txt")
-    #         with open(log_path, "a", encoding="utf-8") as lf:
-    #             lf.write(f"{image_id}\tparse_after_cleaning_error\t{e}\n")
-    #     except Exception:
-    #         pass
-    #     return {}
-    #
-    # # 6) Fix bbox format
-    # fixed = []
-    # for b in data.get("bboxes", []):
-    #     if not isinstance(b, dict):
-    #         continue
-    #     b = dict(b)  # Copy
-    #
-    #     # if the keys end with '=', remove the '='
-    #     for _k in list(b.keys()):
-    #         if isinstance(_k, str) and _k.endswith('='):
-    #             b[_k[:-1]] = b.pop(_k)
-    #         if isinstance(_k, str) and _k.endswith(':'):
-    #             b[_k[:-1]] = b.pop(_k)
-    #
-    #     # Try to convert numeric values to float
-    #     for k in ["x1", "y1", "x2", "y2", "width", "height", "w", "h", "x", "y"]:
-    #         if k in b and isinstance(b[k], str):
-    #             nums = re.findall(r'-?\d+\.?\d*', b[k])
-    #             b[k] = float(nums[0]) if nums else b[k]
-    #
-    #     # If "x2" or "y2" is missing, calculate from "x1", "y1" and "width", "height"
-    #     if "x2" not in b and "width" in b and "x1" in b:
-    #         try:
-    #             b["x2"] = float(b["x1"]) + float(b.get("width", 0))
-    #         except Exception:
-    #             pass
-    #     if "y2" not in b and "height" in b and "y1" in b:
-    #         try:
-    #             b["y2"] = float(b["y1"]) + float(b.get("height", 0))
-    #         except Exception:
-    #             pass
-    #
-    #     fixed.append(b)
-    # return {"bboxes": fixed}
 
 
 # </editor-fold>
 
 
 def process_image(image_file: str):
+    global annotation_id_counter
+
     # (1) Check if the file is an image
     if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
         return None
@@ -403,7 +246,6 @@ def process_image(image_file: str):
         return None
 
     image_path = os.path.join(image_dir, image_file)
-    local_coco = []
     # (3) Prepare local COCO and step prediction structures
     local_step = {
         "image_id": image_id,
@@ -424,7 +266,18 @@ def process_image(image_file: str):
             with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
                 lf.write(f"{image_id}\tread_image_error\t{e}\n")
             # Return placeholder
-            return image_id, local_coco, local_step
+            return image_id, annotations, local_step
+
+        img_pil = Image.open(image_path)
+        width, height = img_pil.size
+
+        # append to images_info (COCO format)
+        images_info.append({
+            "id": int(image_id),  # must be int
+            "width": width,
+            "height": height,
+            "file_name": os.path.join(image_dir, image_file)
+        })
 
         # === 1) BBOX Prediction===
         bboxes = []
@@ -498,19 +351,23 @@ def process_image(image_file: str):
             for b in bboxes:
                 x1, y1 = parse_coord(b.get("x1")), parse_coord(b.get("y1"))
                 x2, y2 = parse_coord(b.get("x2")), parse_coord(b.get("y2"))
-
                 x1, x2 = sorted((x1, x2))
                 y1, y2 = sorted((y1, y2))
+                bbox_xywh = xyxy_to_xywh(x1, y1, x2, y2)
+                cat_id = label_to_category_id(b.get("label", ""))
 
-                cat_id = label_to_category_id(b.get("label",""))
                 if cat_id is not None:
-                    local_coco.append({
-                        "image_id": image_id,
+                    area = bbox_xywh[2] * bbox_xywh[3]  # width * height
+                    annotations.append({
+                        "id": annotation_id_counter,
+                        "image_id": int(image_id),
                         "category_id": cat_id,
-                        "category_name": b["label"],
-                        "bbox": xyxy_to_xywh(x1, y1, x2, y2),
-                        "score": safe_float(b.get("score",1.0))
+                        "bbox": bbox_xywh,
+                        "area": area,
+                        "iscrowd": 0,
+                        "segmentation": []  # leave empty for bbox-only COCO
                     })
+                    annotation_id_counter += 1
                 color = "green" if any(t in b["label"].lower() for t in ["uterus","ovaries","tubes","bladder","ureter"]) else "red"
                 draw.rectangle([x1,y1,x2,y2], outline=color, width=3)
                 draw.text((x1, max(y1-12,0)), b.get("label",""), fill=color, font=font_def)
@@ -523,7 +380,7 @@ def process_image(image_file: str):
                 lf.write(f"{image_id}\tVisualization_error\t{e}\n")
 
         # (4) Finalize and return results
-        return image_id, local_coco, local_step
+        return image_id, annotations, local_step
 
     except Exception as e:
         # Deal with unexpected errors
@@ -531,7 +388,7 @@ def process_image(image_file: str):
         with open(os.path.join(output_dir, "failure_log.txt"), "a", encoding="utf-8") as lf:
             lf.write(f"{image_id}\touter_try_except\t{e}\n")
         # Return placeholder
-        return image_id, local_coco, local_step
+        return image_id, annotations, local_step
 
 def extract_id(fname):
     m = re.match(r'(\d+)', os.path.splitext(fname)[0])
@@ -565,8 +422,17 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         step_predictions.append(step_dict)
 
         # (2) Write outputs to JSON files
-        with open(detections_path, "w", encoding="utf-8") as f:
-            json.dump(coco_detections, f, ensure_ascii=False, indent=2)
+        try:
+            with open(detections_path, "w", encoding="utf-8") as f:
+                json.dump(coco_detections, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"⚠️ Failed to write detections JSON: {e}")
+            try:
+                log_path = os.path.join(output_dir, "failure_log.txt")
+                with open(log_path, "a", encoding="utf-8") as lf:
+                    lf.write(f"{image_id}\tDetections_JSON_writing_error\t{e}\n")
+            except Exception:
+                pass
         with open(steps_path, "w", encoding="utf-8") as f:
             json.dump(step_predictions, f, ensure_ascii=False, indent=2)
 
@@ -578,6 +444,20 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
 
 
 # === After processing all images: write outputs ===
+
+coco_categories = [
+    {"id": v, "name": k, "supercategory": "instrument" if k in INSTRUMENT_LABELS else "tissue"}
+    for k, v in CATEGORY_MAP.items()
+]
+
+coco_output = {
+    "images": images_info,
+    "annotations": annotations,
+    "categories": coco_categories
+}
+with open(detections_path, "w", encoding="utf-8") as f:
+    json.dump(coco_output, f, ensure_ascii=False, indent=2)
+
 try:
     with open(steps_path, "w", encoding="utf-8") as f:
         json.dump(step_predictions, f, ensure_ascii=False, indent=2)
