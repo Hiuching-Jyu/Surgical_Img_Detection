@@ -1,0 +1,275 @@
+import os, json, base64, re, time, mimetypes, pathlib, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+from PIL import Image, ImageDraw, ImageFont
+from tqdm import tqdm
+from openai import OpenAI
+
+# Initialization
+MAX_WORKERS = 8                 # maximum concurrent threads
+MAX_RETRIES = 3                  # maximum retries for API calls
+BACKOFF = [0.6, 1.2, 2.4]        # backoff times in seconds for retries
+MAX_COMPLETION_TOKENS = 3000     # maximum tokens for model response
+SAVE_DEBUG_RAW = True            # save raw model responses for debugging
+
+# Path
+image_dir = "/home/hiuching-g/PRHK/test_images_328"
+output_dir = "/home/hiuching-g/PRHK/Output/Output_GPT4o_Benchmark_328"
+raw_dir = os.path.join(output_dir, "_raw")
+
+os.makedirs(output_dir, exist_ok=True)
+os.makedirs(raw_dir, exist_ok=True)
+
+client = OpenAI()
+
+# Prompt
+def build_prompt():
+    return (
+        "You are an expert in surgical image annotation.\n\n"
+        "Your task is to analyze a surgical image and output:\n"
+        "1) The current surgical step (choose one from the 9 steps below).\n"
+        "2) Bounding boxes for any visible surgical instruments or body tissues (labels below).\n\n"
+        "Surgical Steps (choose one exactly):\n"
+        "- Preparation & Exposure\n"
+        "- Dissection & Vessel Control\n"
+        "- Uterus Removal & Closure\n"
+        "Instrument Labels (red): Bipolar Forceps, Monopolar Scissors, Suction Irrigator, Needle Driver, Cautery Hook, UnclearInstrument\n"
+        "Tissue Labels (green): Uterus, Ovaries, Fallopian Tubes, Bladder, Ureter, Bleeding Area\n\n"
+        "Rules:\n"
+        "- Only include labels and boxes for items that are clearly visible.\n"
+        "- The image resolution is 1924 (width) x 1080 (height). Use absolute pixel coordinates.\n"
+        "- Output JSON ONLY (no markdown, no commentary).\n\n"
+        "JSON schema:\n"
+        "{\n"
+        '  "step": "<one of the 3 step names>",\n'
+        '  "bboxes": [\n'
+        '    {"label": "<label name>", "x1": int, "y1": int, "x2": int, "y2": int}\n'
+        "  ]\n"
+        "}\n"
+    )
+
+# JSON Extraction
+def extract_json(text: str):
+    if not text:
+        raise ValueError("Model returned empty content")
+    s = text.strip()
+
+    # 1) JSON object in plain text
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # 2) ```json fenced
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s)
+    if m:
+        cand = m.group(1).strip()
+        try:
+            return json.loads(cand)
+        except Exception:
+            pass
+
+    # 3) paired braces
+    start = s.find("{")
+    if start != -1:
+        depth, in_str, esc = 0, False, False
+        for i in range(start, len(s)):
+            ch = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"': in_str = True
+                elif ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        cand = s[start:i+1]
+                        try:
+                            return json.loads(cand)
+                        except Exception:
+                            break
+    raise ValueError("No valid JSON object found in model output.")
+
+# Helper Functions
+
+def output_exists_for(fname: str) -> bool:
+    """check if the annotated output file already exists"""
+    out_path = os.path.join(output_dir, f"annotated_{fname}")
+    return os.path.exists(out_path)
+
+
+def make_data_url(image_path: str) -> str:
+    mime, _ = mimetypes.guess_type(image_path)
+    if mime is None:
+        try:
+            fmt = Image.open(image_path).format  # "PNG"/"JPEG"
+            mime = f"image/{fmt.lower()}"
+        except Exception:
+            mime = "image/jpeg"
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+def save_raw_reply(fname, content: Optional[str]):
+    if not SAVE_DEBUG_RAW:
+        return
+    path = os.path.join(raw_dir, f"{os.path.splitext(fname)[0]}_raw.txt")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content if content else "")
+    except Exception:
+        pass
+
+# Call the model with image input
+def call_model_on_image(image_path: str, fname: str) -> Optional[dict]:
+    data_url = make_data_url(image_path)
+    prompt = build_prompt()
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }],
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+                response_format={"type": "json_object"},  # JSON
+            )
+
+            if not resp.choices:
+                raise ValueError("No choices in response.")
+
+            content = (resp.choices[0].message.content or "").strip()
+            save_raw_reply(fname, content)
+
+            if not content:
+                raise ValueError("Model returned empty content")
+
+            payload = extract_json(content)
+
+            # minimal validation
+            if "step" not in payload:
+                raise ValueError("Missing 'step' in JSON")
+            if "bboxes" not in payload or not isinstance(payload["bboxes"], list):
+                payload["bboxes"] = []
+
+            return payload
+
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(BACKOFF[min(attempt, len(BACKOFF)-1)])
+                continue
+            print(f"❌ Error processing {fname}: {e}")
+            return None
+
+# Draw
+INSTRUMENTS = {s.casefold() for s in [
+    "Monopolar Scissors", "Bipolar Forceps", "Suction Irrigator",
+    "Needle Driver", "Cautery Hook", "UnclearInstrument"
+]}
+
+TISSUES = {s.casefold() for s in [
+    "Uterus", "Ovaries", "Fallopian Tubes", "Bladder", "Ureter", "Bleeding Area"
+]}
+
+def norm_label(s: str) -> str:
+    return (s or "").strip()
+
+def label_key(s: str) -> str:
+    # use for case-insensitive matching
+    return norm_label(s).casefold()
+
+def color_for_label(label: str):
+    k = label_key(label)
+    if k in INSTRUMENTS:
+        return "red"
+    if k in TISSUES:
+        return "green"
+    return "yellow"
+
+def annotate_and_save(image_path: str, annotation: dict, output_path: str):
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size=24)
+    except Exception:
+        font = ImageFont.load_default()
+
+    draw.text((20, 20), f"Step: {annotation.get('step', 'Unknown')}", fill="blue", font=font)
+
+    for box in annotation.get("bboxes", []):
+        try:
+            x1 = int(box["x1"]); y1 = int(box["y1"]); x2 = int(box["x2"]); y2 = int(box["y2"])
+            # label = str(box["label"])
+            label = norm_label(box.get("label", ""))
+        except Exception:
+            continue
+        draw.rectangle([x1, y1, x2, y2], outline=color_for_label(label), width=3)
+        draw.text((x1, max(y1 - 22, 0)), label, fill=color_for_label(label), font=font)
+
+    img.save(output_path)
+
+# Print with thread-safe output
+print_lock = threading.Lock()
+def tprint(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+
+# Single image processing function
+def process_one(fname: str):
+    if not fname.lower().endswith((".jpg", ".jpeg", ".png")):
+        return (fname, False, "skip")
+
+    if output_exists_for(fname):
+        return (fname, False, "exists")
+
+    image_path = os.path.join(image_dir, fname)
+    ann = call_model_on_image(image_path, fname)
+    if ann:
+        out_path = os.path.join(output_dir, f"annotated_{fname}")
+        try:
+            annotate_and_save(image_path, ann, out_path)
+            return (fname, True, None)
+        except Exception as e:
+            return (fname, False, f"draw_error: {e}")
+    else:
+        return (fname, False, "model_error")
+
+# Main function
+def main():
+    files = sorted(os.listdir(image_dir))
+    # only process image files
+    files_all = [f for f in files if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+
+    ok = 0
+    files = [f for f in files_all if not output_exists_for(f)]
+    skipped = len(files_all) - len(files)
+    if skipped > 0:
+        tprint(f"⏭️  Skipping {skipped} already-processed images (found in {output_dir}).")
+
+    if not files:
+        tprint("✅ Nothing to do. All images already processed.")
+        return
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {ex.submit(process_one, f): f for f in files}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
+            fname, success, info = fut.result()
+            if success:
+                ok += 1
+            else:
+                tprint(f"⚠️  {fname}: {info}")
+
+    tprint(f"\nDone. Success: {ok}/{len(files)}")
+
+if __name__ == "__main__":
+    main()
